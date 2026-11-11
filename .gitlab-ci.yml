@@ -1,0 +1,92 @@
+stages:
+  - lint
+  - test
+  - build
+  - scan
+  - deploy
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE"
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  DOCKER_TLS_CERTDIR: "/certs"
+
+default:
+  image: python:3.12-slim
+  cache:
+    key:
+      files:
+        - requirements-dev.txt
+    paths:
+      - .cache/pip
+
+.python-setup: &python-setup
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+
+lint:
+  stage: lint
+  <<: *python-setup
+  script:
+    - flake8 app tests --max-line-length=100
+
+test:
+  stage: test
+  <<: *python-setup
+  script:
+    - pytest tests/ --junitxml=report.xml --cov=app
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+build-image:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build -t "$IMAGE_NAME:$IMAGE_TAG" -t "$IMAGE_NAME:latest" .
+    - docker push "$IMAGE_NAME:$IMAGE_TAG"
+    - docker push "$IMAGE_NAME:latest"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+
+container-scan:
+  stage: scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --format table "$IMAGE_NAME:$IMAGE_TAG"
+    - trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE_NAME:$IMAGE_TAG"
+  needs:
+    - build-image
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+deploy-staging:
+  stage: deploy
+  image: alpine:3.20
+  script:
+    - echo "Deploying $IMAGE_NAME:$IMAGE_TAG to staging"
+    # Replace with your real deployment step, for example:
+    # - kubectl set image deployment/sample-app app="$IMAGE_NAME:$IMAGE_TAG"
+    # or an ECS update: aws ecs update-service --cluster ... --service ... --force-new-deployment
+  environment:
+    name: staging
+    url: https://staging.example.com
+  needs:
+    - container-scan
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  when: manual
